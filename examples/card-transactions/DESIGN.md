@@ -92,6 +92,110 @@ Each DynamoDB item represents a **single lifecycle event**:
 
 ---
 
+## How Do You Prevent Duplicate or Invalid Events?
+
+What happens if the network retries and your system receives the same AUTH twice? Or a CLEARING comes in for a transaction that was already reversed? Or someone tries to reverse the same transaction twice?
+
+DynamoDB has no traditional row locks. Instead, it provides **conditional writes** — you attach a condition to your write, and DynamoDB atomically checks the condition and applies the write. If the condition fails, the write is rejected with a `ConditionalCheckFailedException`.
+
+### Problem 1: Duplicate AUTH (same event processed twice)
+
+The same AUTH event is sent twice due to a network retry. Without protection, you'd insert two identical items.
+
+**Solution:** Use `attribute_not_exists` on PutItem. Since PK + SK must be unique, and the SK contains the event token, the second write fails.
+
+```python
+table.put_item(
+    Item={
+        "PK": "TXN#txn_abc123",
+        "SK": "EVENT#2026-03-21T10:30:00Z#evt_001",
+        "event_type": "AUTH",
+        "status": "APPROVED",
+        ...
+    },
+    ConditionExpression="attribute_not_exists(PK)",
+)
+# First call: succeeds, item is created
+# Second call: ConditionalCheckFailedException — item already exists, write rejected
+```
+
+`attribute_not_exists(PK)` means "only write this item if no item with this PK+SK exists yet." This is idempotent — you can safely retry without side effects.
+
+### Problem 2: Double REVERSAL (reversing an already-reversed transaction)
+
+A reversal request comes in, but the transaction was already reversed. Without protection, you'd end up with two REVERSAL events.
+
+**Solution:** Before writing the REVERSAL event, conditionally check that the latest status is still `APPROVED` (not already `REVERSED`). This requires a summary/status item on the transaction.
+
+Add a summary item per transaction that tracks the current state:
+
+```
+PK = TXN#txn_abc123
+SK = STATUS                     ← summary item
+current_status = "APPROVED"
+```
+
+Then use a **conditional update** when processing a reversal:
+
+```python
+# Step 1: Write the reversal event (idempotent with attribute_not_exists)
+table.put_item(
+    Item={
+        "PK": "TXN#txn_abc123",
+        "SK": "EVENT#2026-03-21T16:45:00Z#evt_002",
+        "event_type": "REVERSAL",
+        ...
+    },
+    ConditionExpression="attribute_not_exists(PK)",
+)
+
+# Step 2: Update the status — only if still APPROVED
+table.update_item(
+    Key={"PK": "TXN#txn_abc123", "SK": "STATUS"},
+    UpdateExpression="SET current_status = :new",
+    ConditionExpression="current_status = :expected",
+    ExpressionAttributeValues={
+        ":new": "REVERSED",
+        ":expected": "APPROVED",
+    },
+)
+# If already REVERSED → ConditionalCheckFailedException → reject the duplicate
+```
+
+### Problem 3: CLEARING after REVERSAL (invalid state transition)
+
+A clearing arrives for a transaction that was already reversed. This shouldn't be allowed.
+
+**Solution:** Same pattern — the conditional write on the STATUS item enforces valid state transitions:
+
+```python
+table.update_item(
+    Key={"PK": "TXN#txn_abc123", "SK": "STATUS"},
+    UpdateExpression="SET current_status = :new",
+    ConditionExpression="current_status = :expected",
+    ExpressionAttributeValues={
+        ":new": "SETTLED",
+        ":expected": "APPROVED",   # can only clear if currently approved
+    },
+)
+# If status is REVERSED → condition fails → clearing is rejected
+```
+
+### Valid State Transitions
+
+```
+APPROVED  ──►  SETTLED     (via CLEARING)
+APPROVED  ──►  REVERSED    (via REVERSAL)
+```
+
+The conditional write enforces this state machine at the database level. No application-level locks, no race conditions — DynamoDB guarantees the check-and-update is atomic within a single item.
+
+### Why Not Traditional Locks?
+
+DynamoDB is distributed across many nodes. Holding a pessimistic lock across partitions would kill the performance and availability that DynamoDB is designed for. Optimistic concurrency (try the write, fail if stale) fits the distributed model — you never block other readers or writers, and conflicts are resolved immediately on the conflicting write.
+
+---
+
 ## Getting Started
 
 ```bash
