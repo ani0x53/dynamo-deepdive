@@ -8,8 +8,8 @@ A hands-on project to learn DynamoDB data modelling through real-world use cases
 
 | Example | Description | Design Doc |
 |---|---|---|
-| [card-transactions](./examples/card-transactions/) | Card payment lifecycle tracking with merchant and card indexes | [DESIGN.md](./examples/card-transactions/DESIGN.md) |
-| [instagram-feed](./examples/instagram-feed/) | Precompiled news feed and stories with TTL, fan-out on write | [DESIGN.md](./examples/instagram-feed/DESIGN.md) |
+| [card-transactions](./examples/card-transactions/) | Card payment lifecycle tracking with merchant and card indexes | [README.md](./examples/card-transactions/) |
+| [instagram-feed](./examples/instagram-feed/) | Precompiled news feed and stories with TTL, fan-out on write | [README.md](./examples/instagram-feed/) |
 
 ---
 
